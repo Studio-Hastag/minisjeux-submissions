@@ -1,0 +1,106 @@
+name: Check submission
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [new-games]
+
+permissions:
+  pull-requests: write
+  contents: read
+  checks: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Analyse de la soumission
+        id: check
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const errors = [];
+
+            // --- 1. Le fichier index.html doit exister à la racine ---
+            const filePath = 'index.html';
+            if (!fs.existsSync(filePath)) {
+              errors.push("Aucun fichier `index.html` trouvé à la racine de la branche.");
+            } else {
+              const stats = fs.statSync(filePath);
+              const content = fs.readFileSync(filePath, 'utf8');
+
+              if (stats.size === 0) {
+                errors.push("Le fichier `index.html` est vide.");
+              }
+              if (stats.size > 2 * 1024 * 1024) {
+                errors.push("Le fichier `index.html` dépasse 2 Mo, c'est suspect pour un seul fichier.");
+              }
+              if (!/<script/i.test(content)) {
+                errors.push("Aucune balise `<script>` trouvée — ça ne ressemble pas à un jeu jouable.");
+              }
+            }
+
+            // --- 2. Parsing du corps de la PR ---
+            const body = context.payload.pull_request.body || '';
+
+            const getField = (label) => {
+              const re = new RegExp(`\\*\\*${label}\\s*:\\*\\*\\s*(.*)`, 'i');
+              const m = body.match(re);
+              return m ? m[1].trim() : '';
+            };
+
+            const nom = getField('Nom');
+            const emoji = getField('Emoji');
+            const description = getField('Description');
+            const scoreExcellent = getField('Score excellent \\(uniquement si "jeu à score" est coché, sinon laisse vide\\)');
+
+            const isMobile = /- \[[xX]\] Compatible mobile/.test(body);
+            const isScoreGame = /- \[[xX]\] C'est un jeu à score/.test(body);
+            const confirmAuthor = /- \[[xX]\] Je confirme être l'auteur/.test(body);
+            const confirmStructure = /- \[[xX]\] Je confirme que mon fichier `index\.html`/.test(body);
+
+            if (!nom) errors.push("Le champ **Nom** n'est pas rempli.");
+            if (!emoji) errors.push("Le champ **Emoji** n'est pas rempli.");
+            else if ([...emoji].length > 2) errors.push("Le champ **Emoji** doit contenir un seul emoji.");
+            if (!description) errors.push("Le champ **Description** n'est pas rempli.");
+
+            if (isScoreGame && !scoreExcellent) {
+              errors.push("Tu as coché « jeu à score » mais le champ **Score excellent** est vide.");
+            }
+            if (isScoreGame && scoreExcellent && !/^\d+$/.test(scoreExcellent)) {
+              errors.push("Le champ **Score excellent** doit être un nombre entier.");
+            }
+            if (!isScoreGame && scoreExcellent) {
+              errors.push("Le champ **Score excellent** est rempli mais « jeu à score » n'est pas coché — incohérent.");
+            }
+
+            if (!confirmAuthor) errors.push("La case de confirmation d'autorisation n'est pas cochée.");
+            if (!confirmStructure) errors.push("La case de confirmation de structure n'est pas cochée.");
+
+            // --- 3. Résultat ---
+            const passed = errors.length === 0;
+
+            if (passed) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['en attente de modération humaine']
+              });
+            } else {
+              const list = errors.map(e => `- ${e}`).join('\n');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `❌ **La vérification automatique a échoué :**\n\n${list}\n\nCorrige ces points et repousse un commit, la vérification se relancera automatiquement.`
+              });
+            }
+
+            core.setOutput('passed', passed);
+            if (!passed) core.setFailed('Soumission invalide, voir le commentaire posté sur la PR.');
