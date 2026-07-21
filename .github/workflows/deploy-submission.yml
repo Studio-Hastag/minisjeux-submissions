@@ -19,6 +19,7 @@ jobs:
         with:
           ref: new-games
           fetch-depth: 0
+          token: ${{ secrets.GH_PUSH_TOKEN }}
 
       - name: Extraire l'identifiant depuis les commentaires
         id: extract
@@ -90,8 +91,8 @@ jobs:
 
       - name: Nettoyer new-games
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "hastag-deploy-bot"
+          git config user.email "hastag-deploy-bot@users.noreply.github.com"
           git rm index.html
           git commit -m "deployed: ${{ steps.extract.outputs.slug }}"
           git push origin new-games
