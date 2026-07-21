@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   deploy:
+    # Le workflow DOIT s'exécuter quand tu tapes le commentaire.
+    # Donc on met un if SIMPLE qui ne bloque pas.
     if: startsWith(github.event.comment.body, 'publish ')
     runs-on: ubuntu-latest
 
