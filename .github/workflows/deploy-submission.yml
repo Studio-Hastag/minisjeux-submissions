@@ -10,8 +10,7 @@ permissions:
 
 jobs:
   deploy:
-    # Le workflow DOIT s'exécuter quand tu tapes le commentaire.
-    # Donc on met un if SIMPLE qui ne bloque pas.
+    # Le workflow DOIT se déclencher quand tu tapes le commentaire.
     if: startsWith(github.event.comment.body, 'publish ')
     runs-on: ubuntu-latest
 
@@ -58,7 +57,7 @@ jobs:
             core.setOutput('slug', slug);
             console.log("Slug:", slug);
 
-      - name: Checkout new-games
+      - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
           ref: new-games
