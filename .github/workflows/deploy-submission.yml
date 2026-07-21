@@ -1,66 +1,48 @@
 name: Deploy submission
 
 on:
-  pull_request:
-    types: [closed]
-    branches: [new-games]
+  issue_comment:
+    types: [created]
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
 
 jobs:
   deploy:
-    if: github.event.pull_request.merged == true
+    # 1. Le commentaire doit commencer par "publish "
+    # 2. La PR doit exister
+    # 3. La PR doit être approuvée
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, 'publish ') &&
+      contains(github.event.issue.state_reason, 'approved')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: new-games
-          fetch-depth: 0
-          token: ${{ secrets.GH_PUSH_TOKEN }}
-
-      - name: Extraire l'identifiant depuis le dernier commentaire humain
+      - name: Extraire le slug depuis le commentaire
         id: extract
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PUSH_TOKEN }}
           script: |
-            // 1. Récupérer les commentaires de la PR
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              per_page: 100
-            });
-
-            // 2. Trouver le dernier commentaire humain (non bot)
-            let slug = null;
-            for (let i = comments.length - 1; i >= 0; i--) {
-              const c = comments[i];
-
-              // Ignorer les bots
-              if (c.user.type === "Bot") continue;
-
-              slug = c.body.trim();
-              break;
-            }
-
-            // 3. Vérifications
-            if (!slug) {
-              core.setFailed("Aucun commentaire humain trouvé pour servir d'identifiant.");
-              return;
-            }
+            const body = context.payload.comment.body.trim();
+            const slug = body.replace(/^publish\s+/i, '').trim();
 
             if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
-              core.setFailed(`L'identifiant "${slug}" ne respecte pas le format attendu (minuscules, chiffres, tirets).`);
+              core.setFailed(`Slug invalide: "${slug}". Format attendu: minuscules, chiffres, tirets.`);
               return;
             }
 
             core.setOutput('slug', slug);
-            console.log(`Identifiant retenu : ${slug}`);
+            console.log("Slug:", slug);
+
+      - name: Checkout new-games
+        uses: actions/checkout@v4
+        with:
+          ref: new-games
+          fetch-depth: 0
+          token: ${{ secrets.GH_PUSH_TOKEN }}
 
       - name: Vérifier que le dossier n'existe pas déjà, puis le créer
         uses: appleboy/ssh-action@v1.0.3
@@ -72,7 +54,7 @@ jobs:
           script: |
             DEST="/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${{ steps.extract.outputs.slug }}"
             if [ -d "$DEST" ]; then
-              echo "Le dossier $DEST existe déjà, arrêt pour éviter d'écraser un jeu existant."
+              echo "Le dossier $DEST existe déjà, arrêt."
               exit 1
             fi
             mkdir -p "$DEST"
@@ -86,11 +68,3 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           source: "index.html"
           target: "/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${{ steps.extract.outputs.slug }}/"
-
-      - name: Nettoyer new-games
-        run: |
-          git config user.name "hastag-deploy-bot"
-          git config user.email "hastag-deploy-bot@users.noreply.github.com"
-          git rm index.html
-          git commit -m "deployed: ${{ steps.extract.outputs.slug }}"
-          git push origin new-games
