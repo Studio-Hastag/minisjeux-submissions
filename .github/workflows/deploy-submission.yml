@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   deploy:
-    # Le workflow DOIT se déclencher quand tu tapes le commentaire.
+    # Le workflow doit se déclencher quand tu tapes "publish slug"
     if: startsWith(github.event.comment.body, 'publish ')
     runs-on: ubuntu-latest
 
@@ -57,10 +57,11 @@ jobs:
             core.setOutput('slug', slug);
             console.log("Slug:", slug);
 
-      - name: Checkout PR branch
+      - name: Checkout PR source branch
         uses: actions/checkout@v4
         with:
-          ref: new-games
+          # Branche source de la PR (pas new-games !)
+          ref: ${{ github.event.issue.pull_request.head.ref }}
           fetch-depth: 0
           token: ${{ secrets.GH_PUSH_TOKEN }}
 
