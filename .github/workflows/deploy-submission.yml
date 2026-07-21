@@ -14,6 +14,7 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,12 +22,13 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GH_PUSH_TOKEN }}
 
-      - name: Extraire l'identifiant depuis les commentaires
+      - name: Extraire l'identifiant depuis les commentaires (Team moderateurs)
         id: extract
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PUSH_TOKEN }}
           script: |
+            // 1. Récupérer les commentaires de la PR
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -34,23 +36,30 @@ jobs:
               per_page: 100
             });
 
+            // 2. Récupérer les membres de la Team "moderateurs"
+            const { data: teamMembers } = await github.rest.teams.listMembersInOrg({
+              org: context.repo.owner,
+              team_slug: "moderateurs"
+            });
+
+            const allowedUsers = teamMembers.map(m => m.login.toLowerCase());
+
+            // 3. Parcourir les commentaires du plus récent au plus ancien
             let slug = null;
             for (let i = comments.length - 1; i >= 0; i--) {
               const c = comments[i];
-              try {
-                await github.rest.orgs.checkMembershipForUser({
-                  org: context.repo.owner,
-                  username: c.user.login
-                });
+              const login = c.user.login.toLowerCase();
+
+              // Vérifier si l'auteur du commentaire est membre de la Team
+              if (allowedUsers.includes(login)) {
                 slug = c.body.trim();
                 break;
-              } catch (e) {
-                continue; // pas membre de l'org, on remonte au commentaire précédent
               }
             }
 
+            // 4. Vérifications
             if (!slug) {
-              core.setFailed("Aucun commentaire d'un membre de l'org trouvé pour servir d'identifiant.");
+              core.setFailed("Aucun commentaire d'un membre de la Team 'moderateurs' trouvé pour servir d'identifiant.");
               return;
             }
 
@@ -86,9 +95,6 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           source: "index.html"
           target: "/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${{ steps.extract.outputs.slug }}/"
-
-      # Étape volontairement absente pour l'instant : insertion en base de données.
-      # On y reviendra une fois cette partie déploiement validée.
 
       - name: Nettoyer new-games
         run: |
