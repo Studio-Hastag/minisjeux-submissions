@@ -35,7 +35,7 @@ jobs:
               return;
             }
 
-            console.log("PR approuvée, publication autorisée.");
+            console.log("PR approuvée ✔");
 
       - name: Extraire le slug depuis le commentaire
         id: extract
@@ -47,29 +47,41 @@ jobs:
             const slug = body.replace(/^publish\s+/i, '').trim();
 
             if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
-              core.setFailed(`Slug invalide: "${slug}". Format attendu: minuscules, chiffres, tirets.`);
+              core.setFailed(`Slug invalide: "${slug}".`);
               return;
             }
 
             core.setOutput('slug', slug);
             console.log("Slug:", slug);
 
-      - name: Checkout EXACT commit de la PR
-        uses: actions/checkout@v4
+      - name: Télécharger index.html depuis la PR
+        id: download_file
+        uses: actions/github-script@v7
         with:
-          # Le SHA du commit de la PR (méthode 100% fiable)
-          ref: ${{ github.event.issue.pull_request.head.sha }}
-          fetch-depth: 1
+          github-token: ${{ secrets.GH_PUSH_TOKEN }}
+          script: |
+            const prNumber = context.issue.number;
 
-      - name: Vérifier que index.html existe
-        run: |
-          echo "=== FICHIERS DANS LE WORKSPACE ==="
-          ls -R .
-          if [ ! -f "index.html" ]; then
-            echo "ERREUR: index.html introuvable à la racine."
-            exit 1
-          fi
-          echo "index.html trouvé ✔"
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+
+            const indexFile = files.find(f => f.filename.endsWith("index.html"));
+
+            if (!indexFile) {
+              core.setFailed("index.html introuvable dans la PR.");
+              return;
+            }
+
+            const res = await fetch(indexFile.raw_url);
+            const content = await res.text();
+
+            const fs = require("fs");
+            fs.writeFileSync("index.html", content);
+
+            console.log("index.html téléchargé ✔");
 
       - name: Créer le dossier sur le serveur
         uses: appleboy/ssh-action@v1.0.3
@@ -81,7 +93,7 @@ jobs:
           script: |
             DEST="/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${{ steps.extract.outputs.slug }}"
             if [ -d "$DEST" ]; then
-              echo "Le dossier $DEST existe déjà, arrêt."
+              echo "Le dossier $DEST existe déjà."
               exit 1
             fi
             mkdir -p "$DEST"
