@@ -8,68 +8,80 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  group: publish-${{ github.event.issue.number }}
+
 jobs:
   deploy:
-    if: startsWith(github.event.comment.body, 'publish ')
+    if: >
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, 'publish ')
     runs-on: ubuntu-latest
-
     steps:
-      - name: Vérifier que la PR est approuvée
-        id: check_approval
+      - name: Vérifier l'auteur du commentaire et l'approbation sur le dernier commit
+        id: check
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_PUSH_TOKEN }}
           script: |
             const prNumber = context.issue.number;
 
-            const { data: reviews } = await github.rest.pulls.listReviews({
+            // 1. L'auteur du commentaire doit être membre de l'org
+            try {
+              await github.rest.orgs.checkMembershipForUser({
+                org: context.repo.owner,
+                username: context.payload.comment.user.login
+              });
+            } catch (e) {
+              core.setFailed(`${context.payload.comment.user.login} n'est pas membre de l'organisation, publication refusée.`);
+              return;
+            }
+
+            // 2. Récupérer l'état actuel réel de la PR (source de vérité, pas le payload du commentaire)
+            const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: prNumber
             });
 
-            const approved = reviews.some(r => r.state === "APPROVED");
+            // 3. Il faut une review APPROVED qui porte sur le commit ACTUEL (pas un commit précédent)
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            const validApproval = reviews.some(r => r.state === "APPROVED" && r.commit_id === pr.head.sha);
 
-            if (!approved) {
-              core.setFailed("La PR n'est pas approuvée. Impossible de publier.");
+            if (!validApproval) {
+              core.setFailed("Pas d'approbation valide sur le dernier commit de la PR (soit non approuvée, soit du code a été poussé après l'approbation).");
               return;
             }
 
-            console.log("PR approuvée, publication autorisée.");
+            core.setOutput('sha', pr.head.sha);
+            console.log("Vérifications passées, publication autorisée pour le commit", pr.head.sha);
 
       - name: Extraire le slug depuis le commentaire
         id: extract
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_PUSH_TOKEN }}
-          script: |
-            const body = context.payload.comment.body.trim();
-            const slug = body.replace(/^publish\s+/i, '').trim();
+        run: |
+          SLUG=$(echo "${{ github.event.comment.body }}" | sed -E 's/^publish\s+//i' | xargs)
+          if ! [[ "$SLUG" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+            echo "Slug invalide: $SLUG"
+            exit 1
+          fi
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
 
-            if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
-              core.setFailed(`Slug invalide: "${slug}". Format attendu: minuscules, chiffres, tirets.`);
-              return;
-            }
-
-            core.setOutput('slug', slug);
-            console.log("Slug:", slug);
-
-      - name: Checkout la branche source de la PR
+      - name: Checkout le commit exact approuvé
         uses: actions/checkout@v4
         with:
-          # Branche source de la PR (celle où l'utilisateur a mis son index.html)
-          ref: ${{ github.event.issue.pull_request.head.ref }}
-          fetch-depth: 0
+          ref: ${{ steps.check.outputs.sha }}
           token: ${{ secrets.GH_PUSH_TOKEN }}
 
       - name: Vérifier que index.html existe
         run: |
           if [ ! -f "index.html" ]; then
-            echo "ERREUR: index.html introuvable dans la branche source."
-            ls -R .
+            echo "ERREUR: index.html introuvable."
             exit 1
           fi
-          echo "index.html trouvé."
 
       - name: Créer le dossier sur le serveur
         uses: appleboy/ssh-action@v1.0.3
