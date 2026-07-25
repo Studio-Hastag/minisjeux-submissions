@@ -181,3 +181,119 @@ jobs:
               pull_number: prNumber,
               state: "closed"
             });
+
+
+- name: Créer le dépôt individuel du jeu et donner l'accès au contributeur
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MINISJEUX_ORG_TOKEN }}
+          script: |
+            const slug = "${{ steps.extract.outputs.slug }}";
+            const org = "minisjeux";
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            const contributor = pr.user.login;
+
+            const body = pr.body || '';
+            const getField = (label) => {
+              const re = new RegExp(`\\*\\*${label}\\s*:\\*\\*\\s*(.*)`, 'i');
+              const m = body.match(re);
+              return m ? m[1].trim() : '';
+            };
+            const nom = getField('Nom') || slug;
+
+            // Ne rien faire si le dépôt existe déjà (mise à jour, pas premier publish)
+            let repoExists = true;
+            try {
+              await github.rest.repos.get({ owner: org, repo: slug });
+            } catch (e) {
+              if (e.status === 404) repoExists = false;
+              else throw e;
+            }
+
+            if (repoExists) {
+              console.log(`Le dépôt ${org}/${slug} existe déjà, rien à créer.`);
+              return;
+            }
+
+            // 1. Créer le dépôt
+            await github.rest.repos.createInOrg({
+              org,
+              name: slug,
+              description: nom,
+              private: false,
+              auto_init: false
+            });
+
+            // 2. Pousser index.html (déjà présent sur le runner depuis l'étape de téléchargement)
+            const fs = require('fs');
+            const indexContent = fs.readFileSync('index.html', 'utf8');
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: org,
+              repo: slug,
+              path: 'index.html',
+              message: 'Publication initiale',
+              content: Buffer.from(indexContent).toString('base64')
+            });
+
+            // 3. Pousser le workflow de mise à jour automatique
+            const deployWorkflow = `name: Deploy update
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vérifier que index.html existe
+        run: |
+          if [ ! -f "index.html" ]; then
+            echo "ERREUR: index.html introuvable."
+            exit 1
+          fi
+
+      - name: Copier index.html sur le serveur
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: \${{ secrets.DEPLOY_HOST }}
+          port: \${{ secrets.DEPLOY_PORT }}
+          username: \${{ secrets.DEPLOY_USER }}
+          key: \${{ secrets.DEPLOY_SSH_KEY }}
+          source: "index.html"
+          target: "/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${slug}/"
+`;
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: org,
+              repo: slug,
+              path: '.github/workflows/deploy.yml',
+              message: 'Ajout du workflow de déploiement automatique',
+              content: Buffer.from(deployWorkflow).toString('base64')
+            });
+
+            // 4. Inviter le contributeur comme collaborateur, accès en écriture uniquement sur ce dépôt
+            await github.rest.repos.addCollaborator({
+              owner: org,
+              repo: slug,
+              username: contributor,
+              permission: 'push'
+            });
+
+            // 5. Prévenir le contributeur sur la PR d'origine
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🔗 Ton jeu a maintenant son propre dépôt pour les futures mises à jour : https://github.com/${org}/${slug}\n\nTu y as été ajouté avec un accès en écriture. Pousse simplement sur \`main\` pour republier une nouvelle version, elle sera déployée automatiquement.`
+            });
