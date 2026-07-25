@@ -627,6 +627,10 @@
       subEl.textContent = `Résolue en ${formatTime(state.elapsed)} avec ${state.mistakes} erreur(s).`;
       scoreEl.textContent = score;
       window.dispatchEvent(new CustomEvent("sudoku:complete", { detail: { score, time: state.elapsed, mistakes: state.mistakes, difficulty: state.difficulty } }));
+
+      if (typeof AUTH !== "undefined" && typeof AUTH.showModal === "function") {
+        AUTH.showModal(score, "#6366f1", "sudoku");
+      }
     } else {
       emojiEl.textContent = "😵";
       titleEl.textContent = "Trop d'erreurs";
