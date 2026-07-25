@@ -6,12 +6,13 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   deploy:
     if: startsWith(github.event.comment.body, 'publish ')
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Vérifier que la PR est approuvée
@@ -21,21 +22,17 @@ jobs:
           github-token: ${{ secrets.GH_PUSH_TOKEN }}
           script: |
             const prNumber = context.issue.number;
-
             const { data: reviews } = await github.rest.pulls.listReviews({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: prNumber
             });
-
             const approved = reviews.some(r => r.state === "APPROVED");
-
             if (!approved) {
               core.setFailed("La PR n'est pas approuvée. Impossible de publier.");
               return;
             }
-
-            console.log("PR approuvée, publication autorisée.");
+            console.log("PR approuvée ✔");
 
       - name: Extraire le slug depuis le commentaire
         id: extract
@@ -45,31 +42,75 @@ jobs:
           script: |
             const body = context.payload.comment.body.trim();
             const slug = body.replace(/^publish\s+/i, '').trim();
-
             if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
-              core.setFailed(`Slug invalide: "${slug}". Format attendu: minuscules, chiffres, tirets.`);
+              core.setFailed(`Slug invalide: "${slug}".`);
               return;
             }
-
             core.setOutput('slug', slug);
             console.log("Slug:", slug);
 
-      - name: Checkout la branche source de la PR
-        uses: actions/checkout@v4
+      - name: Télécharger index.html depuis la PR
+        uses: actions/github-script@v7
         with:
-          # Branche source de la PR (celle où l'utilisateur a mis son index.html)
-          ref: ${{ github.event.issue.pull_request.head.ref }}
-          fetch-depth: 0
-          token: ${{ secrets.GH_PUSH_TOKEN }}
+          github-token: ${{ secrets.GH_PUSH_TOKEN }}
+          script: |
+            const prNumber = context.issue.number;
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            const indexFile = files.find(f => f.filename.endsWith("index.html"));
+            if (!indexFile) {
+              core.setFailed("index.html introuvable dans la PR.");
+              return;
+            }
+            const res = await fetch(indexFile.raw_url);
+            const content = await res.text();
+            const fs = require("fs");
+            fs.writeFileSync("index.html", content);
+            console.log("index.html téléchargé ✔");
 
-      - name: Vérifier que index.html existe
-        run: |
-          if [ ! -f "index.html" ]; then
-            echo "ERREUR: index.html introuvable dans la branche source."
-            ls -R .
-            exit 1
-          fi
-          echo "index.html trouvé."
+      - name: Construire le payload pour la base de données
+        id: build_payload
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PUSH_TOKEN }}
+          script: |
+            const prNumber = context.issue.number;
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            const body = pr.body || '';
+
+            const getField = (label) => {
+              const re = new RegExp(`\\*\\*${label}\\s*:\\*\\*\\s*(.*)`, 'i');
+              const m = body.match(re);
+              return m ? m[1].trim() : '';
+            };
+
+            const nom = getField('Nom');
+            const emoji = getField('Emoji');
+            const description = getField('Description');
+            const scoreExcellentRaw = getField('Score excellent \\(uniquement si "jeu à score" est coché, sinon laisse vide\\)');
+
+            const isPcOnly = !/- \[[xX]\] Compatible mobile/.test(body);
+            const isScoreGame = /- \[[xX]\] C'est un jeu à score/.test(body);
+
+            const data = {
+              slug: "${{ steps.extract.outputs.slug }}",
+              nom,
+              emoji,
+              description,
+              isPcOnly,
+              isScoreGame,
+              excellentScore: isScoreGame ? parseInt(scoreExcellentRaw, 10) : null
+            };
+
+            const payload = Buffer.from(JSON.stringify(data)).toString('base64');
+            core.setOutput('payload_b64', payload);
 
       - name: Créer le dossier sur le serveur
         uses: appleboy/ssh-action@v1.0.3
@@ -81,7 +122,7 @@ jobs:
           script: |
             DEST="/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${{ steps.extract.outputs.slug }}"
             if [ -d "$DEST" ]; then
-              echo "Le dossier $DEST existe déjà, arrêt."
+              echo "Le dossier $DEST existe déjà."
               exit 1
             fi
             mkdir -p "$DEST"
@@ -95,3 +136,157 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           source: "index.html"
           target: "/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${{ steps.extract.outputs.slug }}/"
+
+      - name: Insérer en base de données
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            node /home/hastagfr/scripts/insert-game.js "${{ steps.build_payload.outputs.payload_b64 }}"
+
+      - name: Créer le dépôt individuel du jeu et donner l'accès au contributeur
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MINISJEUX_ORG_TOKEN }}
+          script: |
+            const slug = "${{ steps.extract.outputs.slug }}";
+            const org = "minisjeux";
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            const contributor = pr.user.login;
+
+            const body = pr.body || '';
+            const getField = (label) => {
+              const re = new RegExp(`\\*\\*${label}\\s*:\\*\\*\\s*(.*)`, 'i');
+              const m = body.match(re);
+              return m ? m[1].trim() : '';
+            };
+            const nom = getField('Nom') || slug;
+
+            let repoExists = true;
+            try {
+              await github.rest.repos.get({ owner: org, repo: slug });
+            } catch (e) {
+              if (e.status === 404) repoExists = false;
+              else throw e;
+            }
+
+            if (repoExists) {
+              console.log(`Le dépôt ${org}/${slug} existe déjà, rien à créer.`);
+              return;
+            }
+
+            await github.rest.repos.createInOrg({
+              org,
+              name: slug,
+              description: nom,
+              private: false,
+              auto_init: false
+            });
+
+            const fs = require('fs');
+            const indexContent = fs.readFileSync('index.html', 'utf8');
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: org,
+              repo: slug,
+              path: 'index.html',
+              message: 'Publication initiale',
+              content: Buffer.from(indexContent).toString('base64')
+            });
+
+            const deployWorkflow = `name: Deploy update
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vérifier que index.html existe
+        run: |
+          if [ ! -f "index.html" ]; then
+            echo "ERREUR: index.html introuvable."
+            exit 1
+          fi
+
+      - name: Copier index.html sur le serveur
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: \${{ secrets.DEPLOY_HOST }}
+          port: \${{ secrets.DEPLOY_PORT }}
+          username: \${{ secrets.DEPLOY_USER }}
+          key: \${{ secrets.DEPLOY_SSH_KEY }}
+          source: "index.html"
+          target: "/home/hastagfr/projects/hastag/static/minisjeux.hastag.fr/${slug}/"
+`;
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: org,
+              repo: slug,
+              path: '.github/workflows/deploy.yml',
+              message: 'Ajout du workflow de déploiement automatique',
+              content: Buffer.from(deployWorkflow).toString('base64')
+            });
+
+            await github.rest.repos.addCollaborator({
+              owner: org,
+              repo: slug,
+              username: contributor,
+              permission: 'push'
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🔗 Ton jeu a maintenant son propre dépôt pour les futures mises à jour : https://github.com/${org}/${slug}\n\nTu y as été ajouté avec un accès en écriture. Pousse simplement sur \`main\` pour republier une nouvelle version, elle sera déployée automatiquement.`
+            });
+
+      - name: Confirmer la publication et fermer la PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PUSH_TOKEN }}
+          script: |
+            const prNumber = context.issue.number;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: "✅ **Jeu publié avec succès** sur minisjeux.hastag.fr !\n\nCette PR est fermée automatiquement car elle a rempli son rôle — ce n'est pas un rejet, c'est une confirmation que tout s'est bien passé. Merci pour ta contribution 🎉"
+            });
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              labels: ["✅ publié"]
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              name: "en attente de modération humaine"
+            }).catch(() => {});
+
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              state: "closed"
+            });
