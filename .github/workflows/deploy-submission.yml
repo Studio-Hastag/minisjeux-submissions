@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   deploy:
@@ -146,3 +146,38 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             node /home/hastagfr/scripts/insert-game.js "${{ steps.build_payload.outputs.payload_b64 }}"
+
+            - name: Confirmer la publication et fermer la PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PUSH_TOKEN }}
+          script: |
+            const prNumber = context.issue.number;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: "✅ **Jeu publié avec succès** sur minisjeux.hastag.fr !\n\nCette PR est fermée automatiquement car elle a rempli son rôle — ce n'est pas un rejet, c'est une confirmation que tout s'est bien passé. Merci pour ta contribution 🎉"
+            });
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              labels: ["✅ publié"]
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              name: "en attente de modération humaine"
+            }).catch(() => {}); // ignore si le label n'existe pas/déjà retiré
+
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              state: "closed"
+            });
